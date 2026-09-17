@@ -1,5 +1,6 @@
 package com.screenoff.rec;
 
+import android.app.AlarmManager;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -16,12 +17,15 @@ import android.os.Environment;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.PowerManager;
+import android.os.SystemClock;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
 import android.util.Log;
 import android.view.KeyEvent;
 
 import java.io.File;
+import java.io.FileWriter;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.text.SimpleDateFormat;
@@ -47,6 +51,11 @@ public class RecService extends Service {
     public static volatile boolean recording = false;
     public static volatile String  lastError  = null;
 
+    /** 供看门狗广播直接调用的实例引用 */
+    public static volatile RecService self;
+
+    private static final Object LOG_LOCK = new Object();
+
     private static final String CH_ID = "rec";
     private static final int NOTIF_ID = 42;
     private static final String ADB_PERM = "android.permission.SET_VOLUME_KEY_LONG_PRESS_LISTENER";
@@ -55,14 +64,18 @@ public class RecService extends Service {
     private File outFile;
     private Handler handler;
     private Runnable timeoutRun;
+    private Runnable hbRun;
     private Object proxyListener;
     private boolean listenerRegistered = false;
     private long recStartAt = 0L;
+    private PowerManager.WakeLock wl;
 
     @Override public void onCreate() {
         super.onCreate();
         handler = new Handler(Looper.getMainLooper());
+        self = this;
         try { nm(); } catch (Throwable t) { Log.e(TAG, "channel init failed", t); }
+        appendLog("服务创建");
         Log.i(TAG, "service created");
     }
 
@@ -77,6 +90,8 @@ public class RecService extends Service {
                 stopRecordingInternal(false);
                 listening = false;
                 unregisterVolumeListener();
+                stopHeartbeat();
+                releaseWake();
                 prefs().edit().putBoolean("enabled", false).apply();
                 stopForeground(true);
                 stopSelf();
@@ -87,10 +102,15 @@ public class RecService extends Service {
 
             startListeningNotification();
             listening = true;
+            self = this;
             prefs().edit().putBoolean("enabled", true).apply();
             registerVolumeListener();
+            acquireWake();
+            startHeartbeat();
+            scheduleNextAlarm();
         } catch (Throwable t) {
             lastError = "服务启动异常: " + t;
+            appendLog("服务启动异常: " + t);
             Log.e(TAG, "onStartCommand crash", t);
         }
         return START_STICKY;
@@ -100,9 +120,95 @@ public class RecService extends Service {
     public void onDestroy() {
         stopRecordingInternal(false);
         unregisterVolumeListener();
+        stopHeartbeat();
+        releaseWake();
         listening = false;
         recording = false;
+        self = null;
+        appendLog("服务销毁");
         super.onDestroy();
+    }
+
+    // ---------------- 保活：CPU唤醒锁 + 闹钟心跳 ----------------
+
+    private void acquireWake() {
+        if (!prefs().getBoolean("keepAwake", true)) return;
+        try {
+            if (wl == null) {
+                PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+                wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ScreenOffRec:listen");
+            }
+            if (!wl.isHeld()) {
+                wl.acquire(10 * 60 * 1000L); // 10分钟，心跳会不断续期
+                appendLog("获取唤醒锁");
+            }
+        } catch (Throwable t) {
+            appendLog("唤醒锁失败: " + t.getClass().getSimpleName());
+        }
+    }
+
+    private void releaseWake() {
+        try { if (wl != null && wl.isHeld()) wl.release(); } catch (Throwable ignored) { }
+    }
+
+    private void startHeartbeat() {
+        stopHeartbeat();
+        hbRun = new Runnable() {
+            @Override public void run() {
+                if (!listening) return;
+                heartbeatNow();
+                handler.postDelayed(this, 30_000);
+            }
+        };
+        handler.postDelayed(hbRun, 30_000);
+    }
+
+    private void stopHeartbeat() {
+        if (hbRun != null) { handler.removeCallbacks(hbRun); hbRun = null; }
+    }
+
+    private long lastBeatAt = 0;
+
+    /** 心跳：检查监听是否被系统丢弃 + 续期唤醒锁 */
+    public void heartbeatNow() {
+        try {
+            long now = SystemClock.uptimeMillis();
+            if (lastBeatAt != 0) {
+                long gap = now - lastBeatAt;
+                if (gap > 60_000) {
+                    appendLog("心跳间隔异常: " + (gap / 1000) + "s（疑似被系统冻结过）");
+                }
+            }
+            lastBeatAt = now;
+            acquireWake();
+            if (!listenerRegistered) {
+                appendLog("心跳发现监听失效，尝试重新注册");
+                Log.w(TAG, "heartbeat: listener lost, re-registering");
+                registerVolumeListener();
+            }
+        } catch (Throwable t) {
+            appendLog("心跳异常: " + t);
+        }
+    }
+
+    /** 看门狗用：强制拆掉再重装监听（对付系统侧静默摘除监听记录的情况） */
+    public void forceReregister() {
+        appendLog("看门狗强制重注册监听");
+        unregisterVolumeListener();
+        registerVolumeListener();
+    }
+
+    public void scheduleNextAlarm() {
+        try {
+            AlarmManager am = (AlarmManager) getSystemService(ALARM_SERVICE);
+            Intent i = new Intent(this, WatchdogReceiver.class);
+            PendingIntent pi = PendingIntent.getBroadcast(this, 21, i,
+                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+            am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP,
+                    System.currentTimeMillis() + 180_000L, pi);
+        } catch (Throwable t) {
+            appendLog("闹钟预约失败: " + t.getClass().getSimpleName());
+        }
     }
 
     // ---------------- 音量键长按监听（隐藏 API，反射 + 动态代理） ----------------
@@ -133,8 +239,10 @@ public class RecService extends Service {
             listenerRegistered = true;
             lastError = null;
             Log.i(TAG, "音量键监听注册成功");
+            appendLog("音量键监听注册成功");
         } catch (Throwable t) {
             lastError = "音量键监听注册失败: " + t;
+            appendLog("音量键监听注册失败: " + t);
             Log.e(TAG, "registerVolumeListener failed", t);
         }
     }
@@ -155,8 +263,18 @@ public class RecService extends Service {
     }
 
     private void onLongPressKey(KeyEvent e) {
+        // 关键防"鬼魂启动"：进程被冻结后，冻结期间的按键事件会排队，解冻瞬间集中送达。
+        // 超过8秒的迟到事件视为过期，直接丢弃。
+        long age = SystemClock.uptimeMillis() - e.getEventTime();
+        if (age > 8000) {
+            appendLog("忽略过期长按事件: age=" + age + "ms key=" + e.getKeyCode()
+                    + " action=" + e.getAction());
+            Log.i(TAG, "drop stale volume event age=" + age);
+            return;
+        }
         Log.i(TAG, "onLongPressKey action=" + e.getAction()
                 + " key=" + e.getKeyCode() + " repeat=" + e.getRepeatCount());
+        appendLog("长按事件: key=" + e.getKeyCode() + " action=" + e.getAction());
         if (e.getAction() != KeyEvent.ACTION_DOWN || e.getRepeatCount() > 0) return;
         boolean swap = prefs().getBoolean("swap", false);
         int startKey = swap ? KeyEvent.KEYCODE_VOLUME_UP   : KeyEvent.KEYCODE_VOLUME_DOWN;
@@ -205,6 +323,7 @@ public class RecService extends Service {
             recStartAt = System.currentTimeMillis();
             lastError = null;
             Log.i(TAG, "recording started -> " + outFile.getAbsolutePath());
+            appendLog("开始录音 -> " + outFile.getName());
             if (Build.VERSION.SDK_INT < 29) startRecordingNotification();
             vibrate(45);
 
@@ -216,6 +335,7 @@ public class RecService extends Service {
         } catch (Throwable t) {
             recording = false;
             lastError = "录音启动失败（麦克风可能被占用）: " + t.getClass().getSimpleName();
+            appendLog("录音启动失败: " + t);
             releaseRecorder();
             startListeningNotification();
             vibrate(18); vibrate(18);
@@ -234,6 +354,7 @@ public class RecService extends Service {
                     new String[]{outFile.getAbsolutePath()}, new String[]{"audio/mp4"}, null);
         }
         if (feedback) vibrate(25);
+        appendLog("停止录音" + (outFile != null ? " -> " + outFile.getName() : ""));
         startListeningNotification();
     }
 
@@ -333,5 +454,21 @@ public class RecService extends Service {
                 v.vibrate(ms);
             }
         } catch (Throwable ignored) { }
+    }
+
+    /** 落盘诊断日志：/sdcard/Rec/.log.txt（超过256KB自动清空重写） */
+    public static void appendLog(String msg) {
+        synchronized (LOG_LOCK) {
+            try {
+                File dir = new File(Environment.getExternalStorageDirectory(), "Rec");
+                if (!dir.exists()) dir.mkdirs();
+                File f = new File(dir, ".log.txt");
+                if (f.length() > 262144) f.delete();
+                String ts = new SimpleDateFormat("MM-dd HH:mm:ss", Locale.US).format(new Date());
+                FileWriter w = new FileWriter(f, true);
+                w.write(ts + " " + msg + "\n");
+                w.close();
+            } catch (Throwable ignored) { }
+        }
     }
 }

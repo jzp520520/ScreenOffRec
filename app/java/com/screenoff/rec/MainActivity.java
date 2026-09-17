@@ -160,6 +160,12 @@ public class MainActivity extends Activity {
             root.addView(btnNotif, match());
         }
 
+        CheckBox ka = new CheckBox(this);
+        ka.setText("增强保活（CPU唤醒锁+5分钟闹钟心跳，防系统冻结，轻微耗电）");
+        ka.setChecked(prefs.getBoolean("keepAwake", true));
+        ka.setOnCheckedChangeListener((b, w) -> prefs.edit().putBoolean("keepAwake", w).apply());
+        root.addView(ka);
+
         cbSwap = new CheckBox(this);
         cbSwap.setText("交换音量键（长按音量上开始 / 长按音量下停止）");
         cbSwap.setChecked(prefs.getBoolean("swap", false));
