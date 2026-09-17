@@ -24,7 +24,7 @@
 
 ### 第 1 步：安装 App
 
-到 [**Releases 页面**](../../releases) 下载最新的 `ScreenOffRec_vX.X.apk`，安装（需允许"未知来源"）。
+到 [**Releases 页面**](https://github.com/jzp520520/ScreenOffRec/releases) 下载最新的 `ScreenOffRec_vX.X.apk`，安装（需允许"未知来源"）。
 
 ### 第 2 步：ADB 授权音量键监听（唯一需要电脑的一步）
 
