@@ -44,8 +44,8 @@ public class RecService extends Service {
     public static final String ACTION_START        = "com.screenoff.rec.START";
     public static final String ACTION_STOP_ALL     = "com.screenoff.rec.STOP_ALL";
     public static final String ACTION_REC_START    = "com.screenoff.rec.REC_START";
+    public static final String ACTION_REC_START_VID = "com.screenoff.rec.REC_START_VID";
     public static final String ACTION_REC_STOP     = "com.screenoff.rec.REC_STOP";
-    public static final String ACTION_MODE_TOGGLE  = "com.screenoff.rec.MODE_TOGGLE";
 
     /** 供 UI 轮询的状态位 */
     public static volatile boolean listening = false;
@@ -103,12 +103,8 @@ public class RecService extends Service {
                 stopSelf();
                 return START_NOT_STICKY;
             }
-            if (ACTION_MODE_TOGGLE.equals(action)) {
-                String next = "video".equals(prefs().getString("mode", "audio")) ? "audio" : "video";
-                prefs().edit().putString("mode", next).apply();
-                appendLog("模式切换 -> " + ("video".equals(next) ? "视频" : "音频"));
-            }
-            if (ACTION_REC_START.equals(action)) startRecording();
+            if (ACTION_REC_START.equals(action)) startAudioInternal();
+            else if (ACTION_REC_START_VID.equals(action)) startVideoInternal();
             else if (ACTION_REC_STOP.equals(action)) stopRecordingInternal(true);
 
             startListeningNotification();
@@ -287,25 +283,21 @@ public class RecService extends Service {
                 + " key=" + e.getKeyCode() + " repeat=" + e.getRepeatCount());
         appendLog("长按事件: key=" + e.getKeyCode() + " action=" + e.getAction());
         if (e.getAction() != KeyEvent.ACTION_DOWN || e.getRepeatCount() > 0) return;
+        // v2.1 键位：空闲时长按下=录音、长按上=录像（swap 可交换）；录制中任意键长按=停止
         boolean swap = prefs().getBoolean("swap", false);
-        int startKey = swap ? KeyEvent.KEYCODE_VOLUME_UP   : KeyEvent.KEYCODE_VOLUME_DOWN;
-        int stopKey  = swap ? KeyEvent.KEYCODE_VOLUME_DOWN : KeyEvent.KEYCODE_VOLUME_UP;
+        int audioKey = swap ? KeyEvent.KEYCODE_VOLUME_UP   : KeyEvent.KEYCODE_VOLUME_DOWN;
+        int videoKey = swap ? KeyEvent.KEYCODE_VOLUME_DOWN : KeyEvent.KEYCODE_VOLUME_UP;
         int code = e.getKeyCode();
-        if (code == startKey && !recording) {
-            startRecording();
-        } else if (code == stopKey && recording) {
+        if (recording) {
             stopRecordingInternal(true);
+        } else if (code == audioKey) {
+            startAudioInternal();
+        } else if (code == videoKey) {
+            startVideoInternal();
         }
     }
 
     // ---------------- 录音 / 录像 ----------------
-
-    /** 按当前模式（pref mode=audio|video）启动对应录制 */
-    private void startRecording() {
-        if (recording) return;
-        if ("video".equals(prefs().getString("mode", "audio"))) startVideoInternal();
-        else startAudioInternal();
-    }
 
     private void startAudioInternal() {
         Log.i(TAG, "startRecording begin");
@@ -554,15 +546,14 @@ public class RecService extends Service {
     private void startListeningNotification() {
         boolean adbOk = checkSelfPermission(ADB_PERM) == PackageManager.PERMISSION_GRANTED;
         Log.i(TAG, "startListeningNotification adbOk=" + adbOk + " recording=" + recording);
-        String mode = prefs().getString("mode", "audio");
-        boolean videoMode = "video".equals(mode);
+        boolean swap = prefs().getBoolean("swap", false);
         String text = adbOk
-                ? (videoMode ? "模式=录像 · 长按 音量下 开始 · 音量上 停止"
-                             : "长按 音量下=开始 · 音量上=停止（短按调音量不受影响）")
+                ? (swap ? "长按 音量上=录音 · 音量下=录像 · 录制中任意键停止"
+                        : "长按 音量下=录音 · 音量上=录像 · 录制中任意键停止")
                 : "音量键触发未授权：请先执行 ADB 命令。下方按钮仍可用";
         Notification n = baseBuilder("息屏速录 · 监听中", text)
-                .addAction(action(videoMode ? "● 开始录像" : "● 开始录音", ACTION_REC_START, 11))
-                .addAction(action(videoMode ? "🎤 切音频模式" : "🎥 切录像模式", ACTION_MODE_TOGGLE, 14))
+                .addAction(action("● 录音", ACTION_REC_START, 11))
+                .addAction(action("🔴 录像", ACTION_REC_START_VID, 15))
                 .addAction(action("■ 停止监听", ACTION_STOP_ALL, 12))
                 .build();
         if (Build.VERSION.SDK_INT >= 29 && !recording) {
@@ -574,7 +565,7 @@ public class RecService extends Service {
     }
 
     private Notification buildRecordingNotification() {
-        return baseBuilder("● 录音中", "长按 音量上 停止（通知按钮也可）")
+        return baseBuilder("● 录音中", "长按任意音量键停止（通知按钮也可）")
                 .setUsesChronometer(true)
                 .setWhen(recStartAt == 0 ? System.currentTimeMillis() : recStartAt)
                 .addAction(action("■ 停止录音", ACTION_REC_STOP, 13))
@@ -582,7 +573,7 @@ public class RecService extends Service {
     }
 
     private Notification buildVideoNotification() {
-        return baseBuilder("🔴 录像中", "长按 停止键 停止（通知按钮也可）")
+        return baseBuilder("🔴 录像中", "长按任意音量键停止（通知按钮也可）")
                 .setSmallIcon(android.R.drawable.ic_media_play)
                 .setUsesChronometer(true)
                 .setWhen(recStartAt == 0 ? System.currentTimeMillis() : recStartAt)

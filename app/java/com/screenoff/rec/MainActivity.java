@@ -46,7 +46,7 @@ public class MainActivity extends Activity {
     private String lastSig = "";
     private Button btnToggleListen, btnToggleRec;
     private CheckBox cbSwap;
-    private Button btnMax, btnMode, btnLens, btnRes;
+    private Button btnMax, btnLens, btnRes, btnToggleRecV;
     private final Handler handler = new Handler();
     private SharedPreferences prefs;
 
@@ -110,8 +110,12 @@ public class MainActivity extends Activity {
         root.addView(btnToggleListen, match());
 
         btnToggleRec = new Button(this);
-        btnToggleRec.setOnClickListener(v -> toggleRec());
+        btnToggleRec.setOnClickListener(v -> toggleRec(false));
         root.addView(btnToggleRec, match());
+
+        btnToggleRecV = new Button(this);
+        btnToggleRecV.setOnClickListener(v -> toggleRec(true));
+        root.addView(btnToggleRecV, match());
 
         tvAdb = new TextView(this);
         tvAdb.setPadding(0, 20, 0, 6);
@@ -128,7 +132,7 @@ public class MainActivity extends Activity {
         root.addView(btnCopy, match());
 
         TextView help = new TextView(this);
-        help.setText("第1步 安装本 App（已完成）\n第2步 点上方按钮复制命令，电脑上执行\n第3步 点「开始监听」→ 息屏后长按音量键即录\n\n· 长按 音量下 = 开始　长按 音量上 = 停止\n· v2.0 支持录像：下方切换「触发模式」即可，\n  按键操作完全相同；通知栏也能一键切模式\n· 短按音量键仍正常调节音量\n· 通知栏也有 ●开始/■停止 按钮，锁屏可直接点");
+        help.setText("第1步 安装本 App（已完成）\n第2步 点上方按钮复制命令，电脑上执行\n第3步 点「开始监听」→ 息屏后即可操作\n\n· 长按 音量下 = 录音　长按 音量上 = 录像\n· 录制中：长按任意音量键 = 停止\n· 通知栏也有 ●录音 / 🔴录像 按钮，锁屏可点\n· 短按音量键仍正常调节音量");
         help.setTextSize(13);
         help.setAlpha(0.75f);
         help.setPadding(0, 8, 0, 16);
@@ -177,27 +181,19 @@ public class MainActivity extends Activity {
         root.addView(ka);
 
         cbSwap = new CheckBox(this);
-        cbSwap.setText("交换音量键（长按音量上开始 / 长按音量下停止）");
+        cbSwap.setText("交换键位（长按音量上=录音 / 长按音量下=录像）");
         cbSwap.setChecked(prefs.getBoolean("swap", false));
-        cbSwap.setOnCheckedChangeListener((b, w) -> prefs.edit().putBoolean("swap", w).apply());
+        cbSwap.setOnCheckedChangeListener((b, w) -> {
+            prefs.edit().putBoolean("swap", w).apply();
+            if (RecService.self != null) RecService.self.refreshNotif();
+        });
         root.addView(cbSwap);
 
         TextView modeTitle = new TextView(this);
-        modeTitle.setText("触发模式（音量键长按启动的内容）");
+        modeTitle.setText("录像设置");
         modeTitle.setTextSize(15);
         modeTitle.setPadding(0, 8, 0, 6);
         root.addView(modeTitle);
-
-        btnMode = new Button(this);
-        btnMode.setAllCaps(false);
-        btnMode.setOnClickListener(v -> {
-            String next = "video".equals(prefs.getString("mode", "audio")) ? "audio" : "video";
-            prefs.edit().putString("mode", next).apply();
-            if (RecService.self != null) RecService.self.refreshNotif();
-            refresh();
-            Toast.makeText(this, "已切换", Toast.LENGTH_SHORT).show();
-        });
-        root.addView(btnMode, match());
 
         btnLens = new Button(this);
         btnLens.setAllCaps(false);
@@ -257,9 +253,10 @@ public class MainActivity extends Activity {
         handler.postDelayed(this::refresh, 400);
     }
 
-    private void toggleRec() {
+    private void toggleRec(boolean video) {
         String action = RecService.recording ? RecService.ACTION_REC_STOP
-                : (RecService.listening ? RecService.ACTION_REC_START : null);
+                : (RecService.listening ? (video ? RecService.ACTION_REC_START_VID
+                                                 : RecService.ACTION_REC_START) : null);
         if (action == null) {
             Toast.makeText(this, "请先「开始监听」", Toast.LENGTH_SHORT).show();
             return;
@@ -300,24 +297,27 @@ public class MainActivity extends Activity {
     private void refresh() {
         boolean adbOk = checkSelfPermission(
                 "android.permission.SET_VOLUME_KEY_LONG_PRESS_LISTENER") == PackageManager.PERMISSION_GRANTED;
-        boolean videoMode = "video".equals(prefs.getString("mode", "audio"));
+        boolean swap = prefs.getBoolean("swap", false);
 
         tvService.setText(RecService.recording
                 ? (RecService.recType == 2 ? "状态：🔴 录像中" : "状态：● 录音中")
-                : (RecService.listening ? "状态：监听中（息屏长按音量键即录）" : "状态：未启动"));
+                : (RecService.listening
+                        ? (swap ? "状态：监听中（息屏长按：上=录音 下=录像）"
+                                : "状态：监听中（息屏长按：下=录音 上=录像）")
+                        : "状态：未启动"));
 
         String err = RecService.lastError;
         tvError.setVisibility(err == null ? View.GONE : View.VISIBLE);
         tvError.setText(err == null ? "" : "⚠ " + err);
 
         btnToggleListen.setText(RecService.listening ? "停止监听" : "开始监听");
-        btnToggleRec.setText(RecService.recording ? "■ 停止"
-                : ("● 立即" + (videoMode ? "录像" : "录音")));
+        btnToggleRec.setText(RecService.recording ? "■ 停止" : "● 立即录音");
+        btnToggleRecV.setVisibility(RecService.recording ? View.GONE : View.VISIBLE);
+        btnToggleRecV.setText("🔴 立即录像");
 
         tvAdb.setText(adbOk ? "音量键触发：✅ 已授权（息屏可用）"
                 : "音量键触发：❌ 未授权（手机连电脑执行下方命令一次）");
 
-        btnMode.setText("当前模式：" + (videoMode ? "🎥 录像（点击切回 🎤 音频）" : "🎤 音频（点击切到 🎥 录像）"));
         boolean front = "front".equals(prefs.getString("lens", "back"));
         btnLens.setText("摄像头：" + (front ? "前置（点击切后置）" : "后置（点击切前置）"));
         btnRes.setText("录像分辨率：" + ("720".equals(prefs.getString("res", "1080")) ? "720p" : "1080p")
@@ -328,7 +328,10 @@ public class MainActivity extends Activity {
 
         cbSwap.setOnCheckedChangeListener(null);
         cbSwap.setChecked(prefs.getBoolean("swap", false));
-        cbSwap.setOnCheckedChangeListener((b, w) -> prefs.edit().putBoolean("swap", w).apply());
+        cbSwap.setOnCheckedChangeListener((b, w) -> {
+            prefs.edit().putBoolean("swap", w).apply();
+            if (RecService.self != null) RecService.self.refreshNotif();
+        });
 
         String sig = dirSignature();
         if (!sig.equals(lastSig)) {
