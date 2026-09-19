@@ -45,11 +45,14 @@ public class RecService extends Service {
     public static final String ACTION_STOP_ALL     = "com.screenoff.rec.STOP_ALL";
     public static final String ACTION_REC_START    = "com.screenoff.rec.REC_START";
     public static final String ACTION_REC_STOP     = "com.screenoff.rec.REC_STOP";
+    public static final String ACTION_MODE_TOGGLE  = "com.screenoff.rec.MODE_TOGGLE";
 
     /** 供 UI 轮询的状态位 */
     public static volatile boolean listening = false;
     public static volatile boolean recording = false;
     public static volatile String  lastError  = null;
+    /** 当前录制类型：0 无 1 音频 2 录像 */
+    public static volatile int recType = 0;
 
     /** 供看门狗广播直接调用的实例引用 */
     public static volatile RecService self;
@@ -61,6 +64,9 @@ public class RecService extends Service {
     private static final String ADB_PERM = "android.permission.SET_VOLUME_KEY_LONG_PRESS_LISTENER";
 
     private MediaRecorder recorder;
+    private MediaRecorder vRec;
+    private android.hardware.Camera camera;
+    private android.graphics.SurfaceTexture previewTex;
     private File outFile;
     private Handler handler;
     private Runnable timeoutRun;
@@ -96,6 +102,11 @@ public class RecService extends Service {
                 stopForeground(true);
                 stopSelf();
                 return START_NOT_STICKY;
+            }
+            if (ACTION_MODE_TOGGLE.equals(action)) {
+                String next = "video".equals(prefs().getString("mode", "audio")) ? "audio" : "video";
+                prefs().edit().putString("mode", next).apply();
+                appendLog("模式切换 -> " + ("video".equals(next) ? "视频" : "音频"));
             }
             if (ACTION_REC_START.equals(action)) startRecording();
             else if (ACTION_REC_STOP.equals(action)) stopRecordingInternal(true);
@@ -287,10 +298,16 @@ public class RecService extends Service {
         }
     }
 
-    // ---------------- 录音 ----------------
+    // ---------------- 录音 / 录像 ----------------
 
+    /** 按当前模式（pref mode=audio|video）启动对应录制 */
     private void startRecording() {
         if (recording) return;
+        if ("video".equals(prefs().getString("mode", "audio"))) startVideoInternal();
+        else startAudioInternal();
+    }
+
+    private void startAudioInternal() {
         Log.i(TAG, "startRecording begin");
         try {
             File dir = new File(Environment.getExternalStorageDirectory(), "Rec");
@@ -320,6 +337,7 @@ public class RecService extends Service {
             }
             recorder.start();
             recording = true;
+            recType = 1;
             recStartAt = System.currentTimeMillis();
             lastError = null;
             Log.i(TAG, "recording started -> " + outFile.getAbsolutePath());
@@ -334,6 +352,7 @@ public class RecService extends Service {
             }
         } catch (Throwable t) {
             recording = false;
+            recType = 0;
             lastError = "录音启动失败（麦克风可能被占用）: " + t.getClass().getSimpleName();
             appendLog("录音启动失败: " + t);
             releaseRecorder();
@@ -346,15 +365,23 @@ public class RecService extends Service {
     private void stopRecordingInternal(boolean feedback) {
         if (timeoutRun != null) { handler.removeCallbacks(timeoutRun); timeoutRun = null; }
         if (!recording) return;
-        try { recorder.stop(); } catch (Throwable ignored) { }
-        releaseRecorder();
+        boolean wasVideo = recType == 2;
+        if (wasVideo) {
+            releaseVideo();
+        } else {
+            try { recorder.stop(); } catch (Throwable ignored) { }
+            releaseRecorder();
+        }
         recording = false;
+        recType = 0;
         if (outFile != null) {
             android.media.MediaScannerConnection.scanFile(this,
-                    new String[]{outFile.getAbsolutePath()}, new String[]{"audio/mp4"}, null);
+                    new String[]{outFile.getAbsolutePath()},
+                    new String[]{wasVideo ? "video/mp4" : "audio/mp4"}, null);
         }
         if (feedback) vibrate(25);
-        appendLog("停止录音" + (outFile != null ? " -> " + outFile.getName() : ""));
+        appendLog("停止" + (wasVideo ? "录像" : "录音")
+                + (outFile != null ? " -> " + outFile.getName() : ""));
         startListeningNotification();
     }
 
@@ -364,6 +391,126 @@ public class RecService extends Service {
             try { recorder.release(); } catch (Throwable ignored) { }
             recorder = null;
         }
+    }
+
+    // ---------------- 录像（MediaRecorder + Camera1，息屏无预览录制） ----------------
+
+    private void startVideoInternal() {
+        if (checkSelfPermission("android.permission.CAMERA") != PackageManager.PERMISSION_GRANTED) {
+            lastError = "录像需要相机权限：请打开 App 点「相机权限」按钮";
+            appendLog("录像失败: 无相机权限");
+            vibrate(60);
+            return;
+        }
+        try {
+            // 必须在打开相机之前把前台服务类型提升为 CAMERA|MICROPHONE
+            if (Build.VERSION.SDK_INT >= 30) {
+                startForeground(NOTIF_ID, buildVideoNotification(),
+                        android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+                                | android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE);
+            } else if (Build.VERSION.SDK_INT >= 29) {
+                startForeground(NOTIF_ID, buildVideoNotification(),
+                        android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE);
+            } else {
+                nm().notify(NOTIF_ID, buildVideoNotification());
+            }
+
+            int facing = "front".equals(prefs().getString("lens", "back"))
+                    ? android.hardware.Camera.CameraInfo.CAMERA_FACING_FRONT
+                    : android.hardware.Camera.CameraInfo.CAMERA_FACING_BACK;
+            android.hardware.Camera.CameraInfo info = new android.hardware.Camera.CameraInfo();
+            int idx = -1;
+            for (int i = 0; i < android.hardware.Camera.getNumberOfCameras(); i++) {
+                android.hardware.Camera.getCameraInfo(i, info);
+                if (info.facing == facing) { idx = i; break; }
+            }
+            camera = android.hardware.Camera.open(idx >= 0 ? idx : 0);
+
+            boolean hd = !"720".equals(prefs().getString("res", "1080"));
+            int w = hd ? 1920 : 1280, h = hd ? 1080 : 720;
+            android.hardware.Camera.Parameters p = camera.getParameters();
+            android.hardware.Camera.Size best = pickSize(p.getSupportedPreviewSizes(), w, h);
+            if (best != null) p.setPreviewSize(best.width, best.height);
+            p.setRecordingHint(true);
+            camera.setParameters(p);
+            camera.unlock();
+
+            // 无 UI 息屏录制：SurfaceTexture 提供虚拟预览面
+            previewTex = new android.graphics.SurfaceTexture(0);
+            if (best != null) previewTex.setDefaultBufferSize(best.width, best.height);
+            try { camera.setPreviewTexture(previewTex); } catch (Throwable ignored) { }
+            android.view.Surface surf = new android.view.Surface(previewTex);
+
+            vRec = new MediaRecorder();
+            vRec.setCamera(camera);
+            vRec.setAudioSource(MediaRecorder.AudioSource.MIC);
+            vRec.setVideoSource(MediaRecorder.VideoSource.CAMERA);
+            vRec.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4);
+            File dir = new File(Environment.getExternalStorageDirectory(), "Rec");
+            if (!dir.exists()) dir.mkdirs();
+            String ts = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date());
+            outFile = new File(dir, "VID_" + ts + ".mp4");
+            vRec.setOutputFile(outFile.getAbsolutePath());
+            if (best != null) vRec.setVideoSize(best.width, best.height);
+            vRec.setVideoFrameRate(30);
+            vRec.setVideoEncodingBitRate(hd ? 12_000_000 : 6_000_000);
+            vRec.setVideoEncoder(MediaRecorder.VideoEncoder.H264);
+            vRec.setAudioEncoder(MediaRecorder.AudioEncoder.AAC);
+            vRec.setAudioEncodingBitRate(128000);
+            vRec.setAudioSamplingRate(44100);
+            try {
+                vRec.setOrientationHint(facing == android.hardware.Camera.CameraInfo.CAMERA_FACING_FRONT ? 270 : 90);
+            } catch (Throwable ignored) { }
+            vRec.setPreviewDisplay(surf);
+            vRec.prepare();
+            vRec.start();
+
+            recording = true;
+            recType = 2;
+            recStartAt = System.currentTimeMillis();
+            lastError = null;
+            appendLog("开始录像 -> " + outFile.getName()
+                    + (best != null ? " (" + best.width + "x" + best.height + ")" : ""));
+            vibrate(45);
+
+            int maxSecs = prefs().getInt("maxSecs", 3600);
+            if (maxSecs > 0) {
+                timeoutRun = () -> stopRecordingInternal(true);
+                handler.postDelayed(timeoutRun, maxSecs * 1000L);
+            }
+        } catch (Throwable t) {
+            appendLog("录像启动失败: " + t);
+            lastError = "录像启动失败: " + t.getClass().getSimpleName();
+            releaseVideo();
+            recording = false;
+            recType = 0;
+            startListeningNotification();
+            vibrate(18); vibrate(18);
+            try { android.widget.Toast.makeText(this, lastError, android.widget.Toast.LENGTH_LONG).show(); } catch (Throwable ignored) { }
+        }
+    }
+
+    private void releaseVideo() {
+        try { if (vRec != null) vRec.stop(); } catch (Throwable ignored) { }
+        try { if (vRec != null) vRec.release(); } catch (Throwable ignored) { }
+        vRec = null;
+        try { if (camera != null) camera.lock(); } catch (Throwable ignored) { }
+        try { if (camera != null) camera.release(); } catch (Throwable ignored) { }
+        camera = null;
+        try { if (previewTex != null) previewTex.release(); } catch (Throwable ignored) { }
+        previewTex = null;
+    }
+
+    private static android.hardware.Camera.Size pickSize(
+            java.util.List<android.hardware.Camera.Size> list, int w, int h) {
+        if (list == null || list.isEmpty()) return null;
+        android.hardware.Camera.Size best = null;
+        for (android.hardware.Camera.Size s : list) {
+            if (s.width == w && s.height == h) return s;
+            if (s.width <= w && s.height <= h
+                    && (best == null || s.width * s.height > best.width * best.height)) best = s;
+        }
+        return best != null ? best : list.get(0);
     }
 
     // ---------------- 通知 ----------------
@@ -407,11 +554,15 @@ public class RecService extends Service {
     private void startListeningNotification() {
         boolean adbOk = checkSelfPermission(ADB_PERM) == PackageManager.PERMISSION_GRANTED;
         Log.i(TAG, "startListeningNotification adbOk=" + adbOk + " recording=" + recording);
+        String mode = prefs().getString("mode", "audio");
+        boolean videoMode = "video".equals(mode);
         String text = adbOk
-                ? "长按 音量下=开始 · 音量上=停止（短按调音量不受影响）"
+                ? (videoMode ? "模式=录像 · 长按 音量下 开始 · 音量上 停止"
+                             : "长按 音量下=开始 · 音量上=停止（短按调音量不受影响）")
                 : "音量键触发未授权：请先执行 ADB 命令。下方按钮仍可用";
         Notification n = baseBuilder("息屏速录 · 监听中", text)
-                .addAction(action("● 开始录音", ACTION_REC_START, 11))
+                .addAction(action(videoMode ? "● 开始录像" : "● 开始录音", ACTION_REC_START, 11))
+                .addAction(action(videoMode ? "🎤 切音频模式" : "🎥 切录像模式", ACTION_MODE_TOGGLE, 14))
                 .addAction(action("■ 停止监听", ACTION_STOP_ALL, 12))
                 .build();
         if (Build.VERSION.SDK_INT >= 29 && !recording) {
@@ -428,6 +579,20 @@ public class RecService extends Service {
                 .setWhen(recStartAt == 0 ? System.currentTimeMillis() : recStartAt)
                 .addAction(action("■ 停止录音", ACTION_REC_STOP, 13))
                 .build();
+    }
+
+    private Notification buildVideoNotification() {
+        return baseBuilder("🔴 录像中", "长按 停止键 停止（通知按钮也可）")
+                .setSmallIcon(android.R.drawable.ic_media_play)
+                .setUsesChronometer(true)
+                .setWhen(recStartAt == 0 ? System.currentTimeMillis() : recStartAt)
+                .addAction(action("■ 停止录像", ACTION_REC_STOP, 13))
+                .build();
+    }
+
+    /** 供 UI 调用：模式设置变化后刷新通知按钮 */
+    public void refreshNotif() {
+        if (!recording) startListeningNotification();
     }
 
     private void startRecordingNotification() {

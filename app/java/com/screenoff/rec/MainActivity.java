@@ -37,6 +37,7 @@ public class MainActivity extends Activity {
     private static final int REQ_MIC = 1;
     private static final int REQ_NOTIF = 2;
     private static final int REQ_WRITE = 3;
+    private static final int REQ_CAM = 4;
 
     private TextView tvService, tvAdb, tvError;
     private LinearLayout llFiles;
@@ -45,7 +46,7 @@ public class MainActivity extends Activity {
     private String lastSig = "";
     private Button btnToggleListen, btnToggleRec;
     private CheckBox cbSwap;
-    private Button btnMax;
+    private Button btnMax, btnMode, btnLens, btnRes;
     private final Handler handler = new Handler();
     private SharedPreferences prefs;
 
@@ -67,7 +68,7 @@ public class MainActivity extends Activity {
         try {
             String ver = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
             ((TextView) findViewById(android.R.id.content).findViewWithTag("subtitle"))
-                    .setText("v" + ver + " · 纯本地录音 · 零联网 · 无广告");
+                    .setText("v" + ver + " · 本地录音录像 · 零联网 · 无广告");
         } catch (Throwable ignored) { }
     }
 
@@ -90,7 +91,7 @@ public class MainActivity extends Activity {
 
         TextView sub = new TextView(this);
         sub.setTag("subtitle");
-        sub.setText("v" + versionName() + " · 纯本地录音 · 零联网 · 无广告");
+        sub.setText("v" + versionName() + " · 本地录音录像 · 零联网 · 无广告");
         sub.setAlpha(0.6f);
         sub.setPadding(0, 0, 0, 24);
         root.addView(sub);
@@ -127,7 +128,7 @@ public class MainActivity extends Activity {
         root.addView(btnCopy, match());
 
         TextView help = new TextView(this);
-        help.setText("第1步 安装本 App（已完成）\n第2步 点上方按钮复制命令，电脑上执行\n第3步 点「开始监听」→ 息屏后长按音量键即录\n\n· 长按 音量下 = 开始录音　长按 音量上 = 停止\n· 短按音量键仍正常调节音量\n· 通知栏也有 ●开始/■停止 按钮，锁屏可直接点");
+        help.setText("第1步 安装本 App（已完成）\n第2步 点上方按钮复制命令，电脑上执行\n第3步 点「开始监听」→ 息屏后长按音量键即录\n\n· 长按 音量下 = 开始　长按 音量上 = 停止\n· v2.0 支持录像：下方切换「触发模式」即可，\n  按键操作完全相同；通知栏也能一键切模式\n· 短按音量键仍正常调节音量\n· 通知栏也有 ●开始/■停止 按钮，锁屏可直接点");
         help.setTextSize(13);
         help.setAlpha(0.75f);
         help.setPadding(0, 8, 0, 16);
@@ -152,9 +153,18 @@ public class MainActivity extends Activity {
         btnStorage.setOnClickListener(v -> requestStorage());
         root.addView(btnStorage, match());
 
+        Button btnCam = new Button(this);
+        btnCam.setText("③ 相机权限（录像用，不录像可不授）");
+        btnCam.setOnClickListener(v -> {
+            if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)
+                Toast.makeText(this, "相机权限已授予", Toast.LENGTH_SHORT).show();
+            else requestPermissions(new String[]{Manifest.permission.CAMERA}, REQ_CAM);
+        });
+        root.addView(btnCam, match());
+
         if (Build.VERSION.SDK_INT >= 33) {
             Button btnNotif = new Button(this);
-            btnNotif.setText("③ 通知权限");
+            btnNotif.setText("④ 通知权限");
             btnNotif.setOnClickListener(v ->
                     requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, REQ_NOTIF));
             root.addView(btnNotif, match());
@@ -171,6 +181,41 @@ public class MainActivity extends Activity {
         cbSwap.setChecked(prefs.getBoolean("swap", false));
         cbSwap.setOnCheckedChangeListener((b, w) -> prefs.edit().putBoolean("swap", w).apply());
         root.addView(cbSwap);
+
+        TextView modeTitle = new TextView(this);
+        modeTitle.setText("触发模式（音量键长按启动的内容）");
+        modeTitle.setTextSize(15);
+        modeTitle.setPadding(0, 8, 0, 6);
+        root.addView(modeTitle);
+
+        btnMode = new Button(this);
+        btnMode.setAllCaps(false);
+        btnMode.setOnClickListener(v -> {
+            String next = "video".equals(prefs.getString("mode", "audio")) ? "audio" : "video";
+            prefs.edit().putString("mode", next).apply();
+            if (RecService.self != null) RecService.self.refreshNotif();
+            refresh();
+            Toast.makeText(this, "已切换", Toast.LENGTH_SHORT).show();
+        });
+        root.addView(btnMode, match());
+
+        btnLens = new Button(this);
+        btnLens.setAllCaps(false);
+        btnLens.setOnClickListener(v -> {
+            prefs.edit().putString("lens",
+                    "front".equals(prefs.getString("lens", "back")) ? "back" : "front").apply();
+            refresh();
+        });
+        root.addView(btnLens, match());
+
+        btnRes = new Button(this);
+        btnRes.setAllCaps(false);
+        btnRes.setOnClickListener(v -> {
+            prefs.edit().putString("res",
+                    "720".equals(prefs.getString("res", "1080")) ? "720" : "1080").apply();
+            refresh();
+        });
+        root.addView(btnRes, match());
 
         btnMax = new Button(this);
         btnMax.setOnClickListener(v -> cycleMax());
@@ -255,8 +300,10 @@ public class MainActivity extends Activity {
     private void refresh() {
         boolean adbOk = checkSelfPermission(
                 "android.permission.SET_VOLUME_KEY_LONG_PRESS_LISTENER") == PackageManager.PERMISSION_GRANTED;
+        boolean videoMode = "video".equals(prefs.getString("mode", "audio"));
 
-        tvService.setText(RecService.recording ? "状态：● 录音中"
+        tvService.setText(RecService.recording
+                ? (RecService.recType == 2 ? "状态：🔴 录像中" : "状态：● 录音中")
                 : (RecService.listening ? "状态：监听中（息屏长按音量键即录）" : "状态：未启动"));
 
         String err = RecService.lastError;
@@ -264,10 +311,17 @@ public class MainActivity extends Activity {
         tvError.setText(err == null ? "" : "⚠ " + err);
 
         btnToggleListen.setText(RecService.listening ? "停止监听" : "开始监听");
-        btnToggleRec.setText(RecService.recording ? "■ 停止录音" : "● 立即录音");
+        btnToggleRec.setText(RecService.recording ? "■ 停止"
+                : ("● 立即" + (videoMode ? "录像" : "录音")));
 
         tvAdb.setText(adbOk ? "音量键触发：✅ 已授权（息屏可用）"
                 : "音量键触发：❌ 未授权（手机连电脑执行下方命令一次）");
+
+        btnMode.setText("当前模式：" + (videoMode ? "🎥 录像（点击切回 🎤 音频）" : "🎤 音频（点击切到 🎥 录像）"));
+        boolean front = "front".equals(prefs.getString("lens", "back"));
+        btnLens.setText("摄像头：" + (front ? "前置（点击切后置）" : "后置（点击切前置）"));
+        btnRes.setText("录像分辨率：" + ("720".equals(prefs.getString("res", "1080")) ? "720p" : "1080p")
+                + "（点击切换）");
 
         int maxSecs = prefs.getInt("maxSecs", 3600);
         btnMax.setText("最长单次：" + (maxSecs == 0 ? "不限" : (maxSecs / 60) + " 分钟"));
@@ -318,8 +372,9 @@ public class MainActivity extends Activity {
             row.setPadding(0, pad, 0, pad);
 
             TextView name = new TextView(this);
-            String label = f.getName().replace("REC_", "").replace(".m4a", "")
-                    + "  (" + (f.length() / 1024) + " KB)";
+            boolean isVid = f.getName().endsWith(".mp4");
+            String base = f.getName().replace(".m4a", "").replace(".mp4", "");
+            String label = (isVid ? "🎥 " : "🎧 ") + base + "  (" + (f.length() / 1024) + " KB)";
             name.setText(label);
             name.setTextSize(14);
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0,
@@ -327,10 +382,10 @@ public class MainActivity extends Activity {
             row.addView(name, lp);
 
             Button play = new Button(this);
-            boolean isPlaying = f.getAbsolutePath().equals(playingPath);
+            boolean isPlaying = !isVid && f.getAbsolutePath().equals(playingPath);
             play.setText(isPlaying ? "■ 停止" : "▶ 播放");
             play.setAllCaps(false);
-            play.setOnClickListener(v -> togglePlay(f));
+            play.setOnClickListener(isVid ? v -> playVideo(f) : v -> togglePlay(f));
             row.addView(play);
 
             Button del = new Button(this);
@@ -366,6 +421,18 @@ public class MainActivity extends Activity {
                 })
                 .setNegativeButton("取消", null)
                 .show();
+    }
+
+    private void playVideo(File f) {
+        try {
+            Uri uri = Uri.parse("content://com.screenoff.rec.files/" + f.getName());
+            Intent it = new Intent(Intent.ACTION_VIEW);
+            it.setDataAndType(uri, "video/mp4");
+            it.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivity(it);
+        } catch (Throwable t) {
+            Toast.makeText(this, "无法打开视频: " + t.getClass().getSimpleName(), Toast.LENGTH_SHORT).show();
+        }
     }
 
     private void togglePlay(File f) {
