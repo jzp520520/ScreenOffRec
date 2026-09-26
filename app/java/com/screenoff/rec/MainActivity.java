@@ -22,6 +22,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.CheckBox;
+import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -391,6 +392,12 @@ public class MainActivity extends Activity {
             play.setOnClickListener(isVid ? v -> playVideo(f) : v -> togglePlay(f));
             row.addView(play);
 
+            Button ren = new Button(this);
+            ren.setText("改");
+            ren.setAllCaps(false);
+            ren.setOnClickListener(v -> promptRename(f));
+            row.addView(ren);
+
             Button del = new Button(this);
             del.setText("删");
             del.setAllCaps(false);
@@ -406,6 +413,50 @@ public class MainActivity extends Activity {
             more.setTextSize(12);
             more.setAlpha(0.6f);
             llFiles.addView(more);
+        }
+    }
+
+    private void promptRename(final File f) {
+        String oldBase = f.getName();
+        int dot = oldBase.lastIndexOf('.');
+        final String ext = dot >= 0 ? oldBase.substring(dot) : "";
+        final String oldName = dot >= 0 ? oldBase.substring(0, dot) : oldBase;
+        final EditText input = new EditText(this);
+        input.setSingleLine(true);
+        input.setText(oldName);
+        input.setSelection(oldName.length());
+        input.setPadding(40, 24, 40, 8);
+        new AlertDialog.Builder(this)
+                .setTitle("重命名")
+                .setMessage("将 " + oldBase + " 改名为：")
+                .setView(input)
+                .setPositiveButton("确定", (d, w) -> doRename(f, input.getText().toString().trim(), ext))
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void doRename(File f, String newName, String ext) {
+        if (newName.isEmpty()) {
+            Toast.makeText(this, "名称不能为空", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (newName.matches(".*[\\\\/:*?\"<>|].*")) {
+            Toast.makeText(this, "名称含非法字符 \\ / : * ? \" < > |", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        File target = new File(f.getParentFile(), newName + ext);
+        if (target.exists()) {
+            Toast.makeText(this, "同名文件已存在", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (f.getAbsolutePath().equals(playingPath)) stopPlayer();
+        boolean ok = f.renameTo(target);
+        Toast.makeText(this, ok ? "已重命名" : "重命名失败", Toast.LENGTH_SHORT).show();
+        if (ok) {
+            android.media.MediaScannerConnection.scanFile(this,
+                    new String[]{f.getAbsolutePath(), target.getAbsolutePath()}, null, null);
+            lastSig = "";
+            refresh();
         }
     }
 
