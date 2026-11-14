@@ -380,7 +380,8 @@ public class RecService extends Service {
             Log.i(TAG, "recording started -> " + outFile.getAbsolutePath());
             appendLog("开始录音 -> " + outFile.getName());
             if (Build.VERSION.SDK_INT < 29) startRecordingNotification();
-            vibrate(45);
+            vibPattern(PAT_START_AUDIO);
+            beep(android.media.ToneGenerator.TONE_PROP_BEEP, 120);
 
             int maxSecs = prefs().getInt("maxSecs", 3600);
             if (maxSecs > 0) {
@@ -394,7 +395,7 @@ public class RecService extends Service {
             appendLog("录音启动失败: " + t);
             releaseRecorder();
             startListeningNotification();
-            vibrate(18); vibrate(18);
+            vibPattern(PAT_ERROR);
             try { android.widget.Toast.makeText(this, lastError, android.widget.Toast.LENGTH_LONG).show(); } catch (Throwable ignored) { }
         }
     }
@@ -416,7 +417,10 @@ public class RecService extends Service {
                     new String[]{outFile.getAbsolutePath()},
                     new String[]{wasVideo ? "video/mp4" : "audio/mp4"}, null);
         }
-        if (feedback) vibrate(25);
+        if (feedback) {
+            vibPattern(PAT_STOP);
+            beep(android.media.ToneGenerator.TONE_CDMA_PIP, 100);
+        }
         appendLog("停止" + (wasVideo ? "录像" : "录音")
                 + (outFile != null ? " -> " + outFile.getName() : ""));
         startListeningNotification();
@@ -436,7 +440,7 @@ public class RecService extends Service {
         if (checkSelfPermission("android.permission.CAMERA") != PackageManager.PERMISSION_GRANTED) {
             lastError = "录像需要相机权限：请打开 App 点「相机权限」按钮";
             appendLog("录像失败: 无相机权限");
-            vibrate(60);
+            vibPattern(PAT_ERROR);
             return;
         }
         try {
@@ -508,7 +512,8 @@ public class RecService extends Service {
             lastError = null;
             appendLog("开始录像 -> " + outFile.getName()
                     + (best != null ? " (" + best.width + "x" + best.height + ")" : ""));
-            vibrate(45);
+            vibPattern(PAT_START_VIDEO);
+            beep(android.media.ToneGenerator.TONE_PROP_BEEP2, 150);
 
             int maxSecs = prefs().getInt("maxSecs", 3600);
             if (maxSecs > 0) {
@@ -522,7 +527,7 @@ public class RecService extends Service {
             recording = false;
             recType = 0;
             startListeningNotification();
-            vibrate(18); vibrate(18);
+            vibPattern(PAT_ERROR);
             try { android.widget.Toast.makeText(this, lastError, android.widget.Toast.LENGTH_LONG).show(); } catch (Throwable ignored) { }
         }
     }
@@ -555,7 +560,7 @@ public class RecService extends Service {
     private NotificationManager nm() {
         NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
         if (Build.VERSION.SDK_INT >= 26) {
-            NotificationChannel ch = new NotificationChannel(CH_ID, "录音控制",
+            NotificationChannel ch = new NotificationChannel(CH_ID, "锁屏速录控制",
                     NotificationManager.IMPORTANCE_LOW);
             ch.setShowBadge(false);
             nm.createNotificationChannel(ch);
@@ -596,7 +601,7 @@ public class RecService extends Service {
                 ? (swap ? "锁屏长按：上=录音 下=录像 · 使用手机/听歌时=调音量 · 录制中任意键停止"
                         : "锁屏长按：下=录音 上=录像 · 使用手机/听歌时=调音量 · 录制中任意键停止")
                 : "音量键触发未授权：请先执行 ADB 命令。下方按钮仍可用";
-        Notification n = baseBuilder("息屏速录 · 监听中", text)
+        Notification n = baseBuilder("锁屏速录 · 监听中", text)
                 .addAction(action("● 录音", ACTION_REC_START, 11))
                 .addAction(action("🔴 录像", ACTION_REC_START_VID, 15))
                 .addAction(action("■ 停止监听", ACTION_STOP_ALL, 12))
@@ -654,6 +659,37 @@ public class RecService extends Service {
             } else {
                 v.vibrate(ms);
             }
+        } catch (Throwable ignored) { }
+    }
+
+    // ---------------- 反馈波形/提示音（v2.4：隔口袋可盲辨，外人难察觉） ----------------
+
+    private static final long[] PAT_START_AUDIO = {0, 80, 60, 80, 60, 220};       // 短短短长→两轻一重
+    private static final long[] PAT_START_VIDEO = {0, 80, 60, 80, 60, 80, 60, 300}; // 三轻一重
+    private static final long[] PAT_STOP        = {0, 60, 90, 300};               // 重-停-长
+    private static final long[] PAT_ERROR       = {0, 60, 80, 60, 80, 60, 80};    // 连震三下
+
+    private void vibPattern(long[] pattern) {
+        try {
+            Vibrator v = (Vibrator) getSystemService(VIBRATOR_SERVICE);
+            if (Build.VERSION.SDK_INT >= 26) {
+                v.vibrate(VibrationEffect.createWaveform(pattern, -1));
+            } else {
+                v.vibrate(pattern, -1);
+            }
+        } catch (Throwable ignored) { }
+    }
+
+    /** 短促提示音：STREAM_MUSIC 上生成音调，音量70%，设置可关 */
+    private void beep(int tone, int ms) {
+        if (!prefs().getBoolean("sound", true)) return;
+        try {
+            final android.media.ToneGenerator tg =
+                    new android.media.ToneGenerator(android.media.AudioManager.STREAM_MUSIC, 70);
+            tg.startTone(tone, ms);
+            handler.postDelayed(() -> {
+                try { tg.release(); } catch (Throwable ignored) { }
+            }, ms + 100);
         } catch (Throwable ignored) { }
     }
 

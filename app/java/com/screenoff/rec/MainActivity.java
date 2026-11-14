@@ -85,7 +85,7 @@ public class MainActivity extends Activity {
         root.setPadding(pad, pad, pad, pad);
 
         TextView title = new TextView(this);
-        title.setText("息屏速录");
+        title.setText("锁屏速录");
         title.setTextSize(26);
         title.setPadding(0, 0, 0, 4);
         root.addView(title);
@@ -176,10 +176,16 @@ public class MainActivity extends Activity {
         }
 
         CheckBox ka = new CheckBox(this);
-        ka.setText("增强保活（CPU唤醒锁+5分钟闹钟心跳，防系统冻结，轻微耗电）");
+        ka.setText("增强保活（CPU唤醒锁+闹钟心跳，防系统冻结，轻微耗电）");
         ka.setChecked(prefs.getBoolean("keepAwake", true));
         ka.setOnCheckedChangeListener((b, w) -> prefs.edit().putBoolean("keepAwake", w).apply());
         root.addView(ka);
+
+        CheckBox snd = new CheckBox(this);
+        snd.setText("开始/停止提示音（安静场合可关闭，仅靠振动确认）");
+        snd.setChecked(prefs.getBoolean("sound", true));
+        snd.setOnCheckedChangeListener((b, w) -> prefs.edit().putBoolean("sound", w).apply());
+        root.addView(snd);
 
         cbSwap = new CheckBox(this);
         cbSwap.setText("交换键位（长按音量上=录音 / 长按音量下=录像）");
