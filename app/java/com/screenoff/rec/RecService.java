@@ -279,44 +279,58 @@ public class RecService extends Service {
             Log.i(TAG, "drop stale volume event age=" + age);
             return;
         }
-        Log.i(TAG, "onLongPressKey action=" + e.getAction()
-                + " key=" + e.getKeyCode() + " repeat=" + e.getRepeatCount());
-        appendLog("长按事件: key=" + e.getKeyCode() + " action=" + e.getAction());
-        if (e.getAction() != KeyEvent.ACTION_DOWN || e.getRepeatCount() > 0) return;
+        boolean isDown = e.getAction() == KeyEvent.ACTION_DOWN;
+        boolean firstDown = isDown && e.getRepeatCount() == 0;
         int code = e.getKeyCode();
+        if (firstDown) {
+            Log.i(TAG, "onLongPressKey key=" + code);
+            appendLog("长按事件: key=" + code);
+        }
 
-        // v2.3 上下文感知：
-        // ① 录制中：任意键长按 = 停止
-        // ② 已解锁（正在使用手机）或后台有音乐播放：让路，长按回归正常调音量
-        // ③ 其余（锁屏/息屏且无音乐）：下=录音 上=录像（swap 可交换）
+        // v2.3.2 上下文感知：
+        // ① 录制中：首次按下 = 停止（同一按键的重复事件/抬起忽略，避免刚开录又误停）
         if (recording) {
-            stopRecordingInternal(true);
+            if (firstDown) stopRecordingInternal(true);
             return;
         }
+
+        // ② 已解锁使用中 或 后台有音乐：让路。按住期间【每个重复事件】都步进一次音量，
+        //    完整还原原生"长按连续调节"手感（音量UI/提示音齐全）
         try {
             android.app.KeyguardManager km =
                     (android.app.KeyguardManager) getSystemService(KEYGUARD_SERVICE);
             android.media.AudioManager am =
                     (android.media.AudioManager) getSystemService(AUDIO_SERVICE);
-            boolean inUse = km != null && !km.isKeyguardLocked();
+            android.os.PowerManager pm =
+                    (android.os.PowerManager) getSystemService(POWER_SERVICE);
+            boolean screenOn = pm != null && pm.isInteractive();
+            boolean keyguardVisible = km != null
+                    && (km.isKeyguardLocked() || km.inKeyguardRestrictedInputMode());
+            boolean inUse = screenOn && !keyguardVisible;
             boolean musicOn = am != null && am.isMusicActive();
             if (inUse || musicOn) {
-                // 模拟原生音量键：按住期间每个重复事件步进一次，音量UI/提示音齐全
-                int dir = code == KeyEvent.KEYCODE_VOLUME_UP
-                        ? android.media.AudioManager.ADJUST_RAISE
-                        : android.media.AudioManager.ADJUST_LOWER;
-                am.adjustSuggestedStreamVolume(dir,
-                        android.media.AudioManager.USE_DEFAULT_STREAM_TYPE,
-                        android.media.AudioManager.FLAG_SHOW_UI
-                                | android.media.AudioManager.FLAG_PLAY_SOUND);
-                if (e.getRepeatCount() == 0) {
-                    appendLog("让路调音量: 使用中=" + inUse + " 音乐=" + musicOn + " key=" + code);
+                if (isDown) {
+                    int dir = code == KeyEvent.KEYCODE_VOLUME_UP
+                            ? android.media.AudioManager.ADJUST_RAISE
+                            : android.media.AudioManager.ADJUST_LOWER;
+                    am.adjustSuggestedStreamVolume(dir,
+                            android.media.AudioManager.USE_DEFAULT_STREAM_TYPE,
+                            android.media.AudioManager.FLAG_SHOW_UI
+                                    | android.media.AudioManager.FLAG_PLAY_SOUND);
+                }
+                if (firstDown) {
+                    appendLog("让路调音量: 使用中=" + inUse + " (亮屏=" + screenOn
+                            + " 锁屏界面=" + keyguardVisible + ") 音乐=" + musicOn + " key=" + code);
                 }
                 return;
             }
         } catch (Throwable t) {
             appendLog("上下文判断异常: " + t.getClass().getSimpleName());
         }
+
+        // ③ 锁屏/息屏且无音乐：只认首次按下，触发开录（下=录音 上=录像，swap 可交换）
+        if (!firstDown) return;
+        appendLog("开录判定通过（锁屏/息屏）");
 
         boolean swap = prefs().getBoolean("swap", false);
         int audioKey = swap ? KeyEvent.KEYCODE_VOLUME_UP   : KeyEvent.KEYCODE_VOLUME_DOWN;
