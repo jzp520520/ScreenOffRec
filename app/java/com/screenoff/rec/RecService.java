@@ -283,14 +283,45 @@ public class RecService extends Service {
                 + " key=" + e.getKeyCode() + " repeat=" + e.getRepeatCount());
         appendLog("长按事件: key=" + e.getKeyCode() + " action=" + e.getAction());
         if (e.getAction() != KeyEvent.ACTION_DOWN || e.getRepeatCount() > 0) return;
-        // v2.1 键位：空闲时长按下=录音、长按上=录像（swap 可交换）；录制中任意键长按=停止
+        int code = e.getKeyCode();
+
+        // v2.3 上下文感知：
+        // ① 录制中：任意键长按 = 停止
+        // ② 已解锁（正在使用手机）或后台有音乐播放：让路，长按回归正常调音量
+        // ③ 其余（锁屏/息屏且无音乐）：下=录音 上=录像（swap 可交换）
+        if (recording) {
+            stopRecordingInternal(true);
+            return;
+        }
+        try {
+            android.app.KeyguardManager km =
+                    (android.app.KeyguardManager) getSystemService(KEYGUARD_SERVICE);
+            android.media.AudioManager am =
+                    (android.media.AudioManager) getSystemService(AUDIO_SERVICE);
+            boolean inUse = km != null && !km.isKeyguardLocked();
+            boolean musicOn = am != null && am.isMusicActive();
+            if (inUse || musicOn) {
+                // 模拟原生音量键：按住期间每个重复事件步进一次，音量UI/提示音齐全
+                int dir = code == KeyEvent.KEYCODE_VOLUME_UP
+                        ? android.media.AudioManager.ADJUST_RAISE
+                        : android.media.AudioManager.ADJUST_LOWER;
+                am.adjustSuggestedStreamVolume(dir,
+                        android.media.AudioManager.USE_DEFAULT_STREAM_TYPE,
+                        android.media.AudioManager.FLAG_SHOW_UI
+                                | android.media.AudioManager.FLAG_PLAY_SOUND);
+                if (e.getRepeatCount() == 0) {
+                    appendLog("让路调音量: 使用中=" + inUse + " 音乐=" + musicOn + " key=" + code);
+                }
+                return;
+            }
+        } catch (Throwable t) {
+            appendLog("上下文判断异常: " + t.getClass().getSimpleName());
+        }
+
         boolean swap = prefs().getBoolean("swap", false);
         int audioKey = swap ? KeyEvent.KEYCODE_VOLUME_UP   : KeyEvent.KEYCODE_VOLUME_DOWN;
         int videoKey = swap ? KeyEvent.KEYCODE_VOLUME_DOWN : KeyEvent.KEYCODE_VOLUME_UP;
-        int code = e.getKeyCode();
-        if (recording) {
-            stopRecordingInternal(true);
-        } else if (code == audioKey) {
+        if (code == audioKey) {
             startAudioInternal();
         } else if (code == videoKey) {
             startVideoInternal();
@@ -548,8 +579,8 @@ public class RecService extends Service {
         Log.i(TAG, "startListeningNotification adbOk=" + adbOk + " recording=" + recording);
         boolean swap = prefs().getBoolean("swap", false);
         String text = adbOk
-                ? (swap ? "长按 音量上=录音 · 音量下=录像 · 录制中任意键停止"
-                        : "长按 音量下=录音 · 音量上=录像 · 录制中任意键停止")
+                ? (swap ? "锁屏长按：上=录音 下=录像 · 使用手机/听歌时=调音量 · 录制中任意键停止"
+                        : "锁屏长按：下=录音 上=录像 · 使用手机/听歌时=调音量 · 录制中任意键停止")
                 : "音量键触发未授权：请先执行 ADB 命令。下方按钮仍可用";
         Notification n = baseBuilder("息屏速录 · 监听中", text)
                 .addAction(action("● 录音", ACTION_REC_START, 11))

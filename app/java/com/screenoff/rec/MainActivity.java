@@ -133,7 +133,7 @@ public class MainActivity extends Activity {
         root.addView(btnCopy, match());
 
         TextView help = new TextView(this);
-        help.setText("第1步 安装本 App（已完成）\n第2步 点上方按钮复制命令，电脑上执行\n第3步 点「开始监听」→ 息屏后即可操作\n\n· 长按 音量下 = 录音　长按 音量上 = 录像\n· 录制中：长按任意音量键 = 停止\n· 通知栏也有 ●录音 / 🔴录像 按钮，锁屏可点\n· 短按音量键仍正常调节音量");
+        help.setText("第1步 安装本 App（已完成）\n第2步 点上方按钮复制命令，电脑上执行\n第3步 点「开始监听」\n\n· 正常使用手机/听歌时：音量键一切照常（含长按调音量）\n· 锁屏或息屏长按：下=录音 上=录像\n· 录制中：长按任意音量键 = 停止\n· 通知栏也有 ●录音 / 🔴录像 按钮，锁屏可点\n· 短按音量键永远正常调节音量");
         help.setTextSize(13);
         help.setAlpha(0.75f);
         help.setPadding(0, 8, 0, 16);
@@ -303,8 +303,8 @@ public class MainActivity extends Activity {
         tvService.setText(RecService.recording
                 ? (RecService.recType == 2 ? "状态：🔴 录像中" : "状态：● 录音中")
                 : (RecService.listening
-                        ? (swap ? "状态：监听中（息屏长按：上=录音 下=录像）"
-                                : "状态：监听中（息屏长按：下=录音 上=录像）")
+                        ? (swap ? "状态：监听中（锁屏长按：上=录音 下=录像）"
+                                : "状态：监听中（锁屏长按：下=录音 上=录像）")
                         : "状态：未启动"));
 
         String err = RecService.lastError;
